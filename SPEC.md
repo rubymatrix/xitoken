@@ -159,19 +159,29 @@ Recommended lifetime: **120 s**. The world maps the player's global id to its ow
 
 ## World gateway API
 
-A world accepts tokens over HTTPS (or plain HTTP on a loopback/private link):
+A world accepts tokens over HTTPS, or plain HTTP on a loopback or private link:
 
     POST <gateway>/xi/v1/world-entry
     Content-Type: text/plain
 
     v4.public....
 
+Before writing the session, the world checks four things:
+
+* the token passes verification;
+* the character exists;
+* the character belongs to the account the world maps to the player's global id `iss:sub`;
+* the world's own login rules allow it (ban status, one session per account, login limits, maintenance mode).
+
 | status | body | meaning |
 |---|---|---|
-| 200 | `{"ok":true}` | session written; the client may connect to the map server |
-| 400 | `{"ok":false,"error":"<error name>"}` | token rejected. Error names are the verification ones, plus `bad_entry` for invalid world-entry claims |
-| 409 | `{"ok":false,"error":"<reason>"}` | token valid but the world refuses the entry (`unknown_character`, `already_logged_in`, `not_permitted`) |
-| 503 | `{"ok":false,"error":"unavailable"}` | the world cannot take entries right now |
+| 200 | `{"ok":true,"map":{"ip":"a.b.c.d","port":n}}` | session written. The provider sends the client to this map server, the one serving the character's zone |
+| 400 | `{"ok":false,"error":"<name>"}` | token rejected: a verification error name, or `bad_entry` for invalid world-entry claims |
+| 409 | `{"ok":false,"error":"<reason>"}` | token valid, but the world refuses the entry: `unknown_character`, `not_permitted` (not the player's character, no account, or banned), `already_logged_in`, `login_limit` |
+| 503 | `{"ok":false,"error":"unavailable"}` | the world cannot take entries right now (maintenance, no map server for the zone) |
+
+A token that passes verification is consumed even if the world then refuses the entry. The provider issues a new
+token for each attempt.
 
 A world publishes its own signed key set (with no signing keys, if it signs nothing yet). That lets providers
 learn and check its server id and name the same way worlds check providers.
