@@ -77,17 +77,42 @@ public class VectorTests
         JsonObject doc = Load("xitoken.json");
         JsonObject c = doc["keyset_cases"]!.AsArray().Single(x => (string)x!["name"]! == name)!.AsObject();
         var resolver = new KeySetResolver();
-        bool ok;
+        KeySet? set = null;
         try
         {
-            resolver.Trust((string)c["token"]!, (string)c["trust"]!, VectorNow(doc));
-            ok = true;
+            set = resolver.Trust((string)c["token"]!, (string)c["trust"]!, VectorNow(doc));
         }
         catch (FormatException)
         {
-            ok = false;
         }
-        Assert.Equal((string)c["expect"]! == "ok", ok);
+        Assert.Equal((string)c["expect"]! == "ok", set is not null);
+        if (c["world"] is JsonObject world)
+        {
+            Assert.Equal((string)world["gateway"]!, set!.World!.Gateway);
+            Assert.Equal((uint)world["expansions"]!, set.World.Expansions);
+            Assert.Equal((string?)world["search"], set.World.Search);
+        }
+    }
+
+    public static TheoryData<string> RegistryNames() => [.. Load("xitoken.json")["registry_cases"]!.AsArray().Select(c => (string)c!["name"]!)];
+
+    [Theory]
+    [MemberData(nameof(RegistryNames))]
+    public void RegistryVectors(string name)
+    {
+        JsonObject doc = Load("xitoken.json");
+        JsonObject c = doc["registry_cases"]!.AsArray().Single(x => (string)x!["name"]! == name)!.AsObject();
+        Registry? registry = null;
+        try
+        {
+            registry = Registry.Open((string)c["token"]!, (string)c["trust"]!, VectorNow(doc));
+        }
+        catch (FormatException)
+        {
+        }
+        Assert.Equal((string)c["expect"]! == "ok", registry is not null);
+        if (registry is not null)
+            Assert.Equal((int)c["servers"]!, registry.Servers.Count);
     }
 
     public static TheoryData<string> XiNames() => [.. Load("xitoken.json")["cases"]!.AsArray().Select(c => (string)c!["name"]!)];

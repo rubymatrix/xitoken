@@ -95,6 +95,29 @@ namespace
             KeySetResolver resolver;
             bool           ok = resolver.trust(c["token"].get<std::string>(), c["trust"].get<std::string>(), now);
             check(ok == (c["expect"] == "ok"), "keyset: " + c["name"].get<std::string>());
+            if (c.contains("world"))
+            {
+                auto set = KeySet::open(c["token"].get<std::string>(), now);
+                check(set && set->world && set->world->gateway == c["world"]["gateway"].get<std::string>() &&
+                          set->world->expansions == c["world"]["expansions"].get<uint32_t>() &&
+                          set->world->search == c["world"].value("search", std::string()),
+                      "keyset world: " + c["name"].get<std::string>());
+            }
+        }
+    }
+
+    void registryVectors()
+    {
+        json    doc = load("xitoken.json");
+        int64_t now = *rfc3339::parse(doc["now"].get<std::string>());
+        for (const auto& c : doc["registry_cases"])
+        {
+            auto registry = Registry::open(c["token"].get<std::string>(), c["trust"].get<std::string>(), now);
+            check(registry.has_value() == (c["expect"] == "ok"), "registry: " + c["name"].get<std::string>());
+            if (registry)
+            {
+                check(registry->servers.size() == c["servers"].get<size_t>(), "registry servers: " + c["name"].get<std::string>());
+            }
         }
     }
 
@@ -204,6 +227,7 @@ int main()
     upstreamVectors();
     serverIds();
     keysetVectors();
+    registryVectors();
     tokenVectors();
     roundTrip();
     std::printf("%d/%d checks passed\n", checks - failures, checks);

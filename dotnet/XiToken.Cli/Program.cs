@@ -37,7 +37,34 @@ static int Run(string[] args)
                     : throw new UsageException("signing keys are given as <kid>=<secret key file>")).ToList();
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 DateTimeOffset? exp = opts.TryGetValue("days", out string? days) ? now.AddDays(int.Parse(days)) : null;
-                Console.WriteLine(KeySet.Create(identity, opts.GetValueOrDefault("name"), keys, now, exp));
+                WorldInfo? world = opts.TryGetValue("gateway", out string? gateway)
+                    ? new WorldInfo(gateway, ParseUInt(opts.GetValueOrDefault("expansions", "1")), opts.GetValueOrDefault("search"))
+                    : null;
+                Console.WriteLine(KeySet.Create(identity, opts.GetValueOrDefault("name"), keys, now, exp, world));
+                return 0;
+            }
+            case "registry":
+            {
+                // xitoken-cli registry --identity registry.key [--name N] [--days n] <id>=<world|provider>=<keyset url>[=<pin>] ...
+                SigningKey identity = LoadKey("identity", Need(opts, "identity"));
+                var servers = positional.Select(p => p.Split('=', 4)).Select(f => f.Length >= 3
+                    ? new RegistryEntry(f[0], f[1], f[2], f.Length == 4 ? f[3] : null)
+                    : throw new UsageException("servers are given as <id>=<world|provider>=<keyset url>[=<pin>]")).ToList();
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+                DateTimeOffset? exp = opts.TryGetValue("days", out string? days) ? now.AddDays(int.Parse(days)) : null;
+                string token = Registry.Create(identity, opts.GetValueOrDefault("name"), servers, now, exp);
+                Registry.Open(token, identity.ServerId, now); // refuse to publish one that does not open
+                Console.WriteLine(token);
+                return 0;
+            }
+            case "show-registry":
+            {
+                if (positional.Count != 1)
+                    throw new UsageException("show-registry takes one file");
+                Registry reg = Registry.Open(File.ReadAllText(positional[0]), Need(opts, "trust"), DateTimeOffset.UtcNow);
+                Console.WriteLine($"registry  {reg.ServerId} ({reg.Name ?? "no name"}), issued {Rfc3339.Format(reg.IssuedAt)}");
+                foreach (RegistryEntry entry in reg.Servers)
+                    Console.WriteLine($"{entry.Role,-9} {entry.Id}  {entry.KeySetUrl}{(entry.Pin is null ? "" : "  pin " + entry.Pin)}");
                 return 0;
             }
             case "show-keyset":
@@ -51,6 +78,8 @@ static int Run(string[] args)
                 Console.WriteLine($"expires   {(set.Expires is { } e ? Rfc3339.Format(e) : "never")}");
                 foreach (TrustedKey key in set.Keys)
                     Console.WriteLine($"key       {key.KeyId}  {Paserk.PublicPrefix}{Base64Url.Encode(key.PublicKey)}");
+                if (set.World is { } w)
+                    Console.WriteLine($"world     gateway {w.Gateway}, expansions 0x{w.Expansions:X4}{(w.Search is null ? "" : ", search " + w.Search)}");
                 return 0;
             }
             case "issue":
@@ -110,9 +139,13 @@ static int Usage()
     Console.Error.WriteLine("""
         usage:
           xitoken-cli keygen --out <file> [--kid <kid>]           new identity or signing key; prints its server id
-          xitoken-cli keyset --identity <identity.key> [--name <display name>] [--days <n>] <kid>=<signing.key> ...
-                                                                  signed key set to publish (stdout)
+          xitoken-cli keyset --identity <identity.key> [--name <display name>] [--days <n>]
+                             [--gateway <url> --expansions <bitmask> [--search <ip:port>]] <kid>=<signing.key> ...
+                                                                  signed key set to publish (stdout); worlds add --gateway
           xitoken-cli show-keyset <file>
+          xitoken-cli registry --identity <registry.key> [--name <name>] [--days <n>]
+                             <server id>=<world|provider>=<keyset url>[=<pin>] ...
+          xitoken-cli show-registry --trust <registry id> <file>
           xitoken-cli issue  --issuer <server id> --kid <kid> --key <signing.key> --type <typ> --aud <world id>
                              --sub <account> [--lifetime <seconds, default 60>] [--claims <json object>]
           xitoken-cli verify --trust <server id>=<key set file>[,...] --aud <world id> --type <typ> <token>
@@ -120,6 +153,9 @@ static int Usage()
         """);
     return 1;
 }
+
+static uint ParseUInt(string text) =>
+    text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.ToUInt32(text[2..], 16) : uint.Parse(text);
 
 static SigningKey LoadKey(string kid, string path) => SigningKey.FromPaserk(kid, File.ReadAllText(path).Trim());
 
@@ -187,6 +223,39 @@ static class Vectors
                         $"{{\"kid\":\"a\",\"public\":\"{signing.PublicPaserk}\"}},{{\"kid\":\"a\",\"public\":\"{forged.PublicPaserk}\"}}]}}"),
                         Utf8($"{{\"idk\":\"{identity.PublicPaserk}\"}}")), provider, "error");
         KeysetCase("a token is not a key set", new TokenIssuer(provider, signing).Issue("xi.account/1", world, "1", TimeSpan.FromMinutes(1)), provider, "error");
+        keysetCases.Add(new JsonObject
+        {
+            ["name"] = "world key set",
+            ["token"] = KeySet.Create(worldIdentity, "Test World", [], now.AddDays(-1), world: new WorldInfo("https://world.example:8088", 0x0FFF, "203.0.113.7:54002")),
+            ["trust"] = world,
+            ["expect"] = "ok",
+            ["world"] = new JsonObject { ["gateway"] = "https://world.example:8088", ["expansions"] = 0x0FFF, ["search"] = "203.0.113.7:54002" },
+        });
+        KeysetCase("world without a gateway",
+            Paseto.Sign(worldIdentity, Utf8($"{{\"typ\":\"xi.keyset/1\",\"iss\":\"{world}\",\"iat\":\"{Now}\",\"keys\":[],\"world\":{{\"expansions\":1}}}}"),
+                        Utf8($"{{\"idk\":\"{worldIdentity.PublicPaserk}\"}}")), world, "error");
+
+        // --- registry cases
+        SigningKey registryIdentity = Seeded("identity", 180);
+        string registry = registryIdentity.ServerId;
+        var registryCases = new JsonArray();
+        void RegistryCase(string name, string token, string trust, string expect, int servers = 0) =>
+            registryCases.Add(new JsonObject { ["name"] = name, ["token"] = token, ["trust"] = trust, ["expect"] = expect, ["servers"] = servers });
+        string RegistryToken(string servers) =>
+            Paseto.Sign(registryIdentity, Utf8($"{{\"typ\":\"xi.registry/1\",\"iss\":\"{registry}\",\"iat\":\"{Now}\",\"servers\":[{servers}]}}"),
+                        Utf8($"{{\"idk\":\"{registryIdentity.PublicPaserk}\"}}"));
+
+        RegistryCase("valid", Registry.Create(registryIdentity, "Test Federation",
+            [
+                new RegistryEntry(world, RegistryEntry.World, "https://world.example:8088/xi/v1/keyset", "sha256:AAAA"),
+                new RegistryEntry(provider, RegistryEntry.Provider, "https://provider.example/xi/v1/keyset"),
+            ], now.AddDays(-1)), registry, "ok", servers: 2);
+        RegistryCase("trusted under another id", Registry.Create(registryIdentity, null, [], now.AddDays(-1)), provider, "error");
+        RegistryCase("keyset URL is not http(s)", RegistryToken($"{{\"id\":\"{world}\",\"role\":\"world\",\"keyset\":\"ftp://world.example/ks\"}}"), registry, "error");
+        RegistryCase("server listed twice", RegistryToken(
+            $"{{\"id\":\"{world}\",\"role\":\"world\",\"keyset\":\"https://a.example/ks\"}},{{\"id\":\"{world}\",\"role\":\"world\",\"keyset\":\"https://b.example/ks\"}}"),
+            registry, "error");
+        RegistryCase("bad server id", RegistryToken("{\"id\":\"world-1\",\"role\":\"world\",\"keyset\":\"https://a.example/ks\"}"), registry, "error");
 
         // --- token cases
         string skey = Base64Url.Encode(Enumerable.Range(0xA0, 20).Select(i => (byte)i).ToArray());
@@ -265,6 +334,7 @@ static class Vectors
             ["identity_secret"] = identity.ToPaserk(),
             ["signing_secret"] = signing.ToPaserk(),
             ["keyset_cases"] = keysetCases,
+            ["registry_cases"] = registryCases,
             ["trusted_keysets"] = new JsonArray(
                 new JsonObject { ["server_id"] = provider, ["token"] = keyset },
                 new JsonObject { ["server_id"] = other, ["token"] = otherKeyset }),
